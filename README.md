@@ -20,6 +20,8 @@ token speed in pi's footer status bar, live while the model is streaming.
 - **Cheap local estimate while streaming** — CJK / kana / hangul count as roughly 1 token per
   character and everything else as roughly 4 characters per token, which matches
   mixed-language output better than a single divisor. Estimated values are prefixed with `~`.
+- **Configurable from `settings.json`** — window length and refresh interval can be tuned
+  without touching code; invalid values fall back to defaults with a one-time warning.
 - **Dependency-free and stateless** — nothing is persisted; the interval is cleared on
   `agent_end` and `session_shutdown`.
 
@@ -61,9 +63,9 @@ pi remove git:github.com/evander-wang/pi-token-speed
 
 The extension uses pi's public Extension API:
 
-- `message_start` (assistant) starts a run and a 500 ms refresh interval. A run is not
-  restarted per message: one agent run can contain several assistant messages with tool calls
-  in between.
+- `session_start` (and the start of each run) re-reads the optional config section.
+- `message_start` (assistant) starts a run and a refresh interval. A run is not restarted per
+  message: one agent run can contain several assistant messages with tool calls in between.
 - `message_update` feeds `text_delta` / `thinking_delta` / `toolcall_delta` into the window.
   It uses the provider's cumulative `usage.output` increment when it is available and falls
   back to the local character estimate otherwise.
@@ -75,16 +77,37 @@ The extension uses pi's public Extension API:
 The live number is an estimate of throughput, not a billing figure. Only the value after
 `agent_end` comes from provider usage.
 
-## Tunables
+## Configuration
 
-All of them are constants at the top of `extensions/token-speed.ts`:
+Optional. Add a `piTokenSpeed` section to `~/.pi/agent/settings.json`:
 
-| Constant | Default | Meaning |
-| --- | --- | --- |
-| `WINDOW_MS` | `3000` | Sliding window for the live rate. Longer = steadier, shorter = more reactive. |
-| `MIN_SPAN_MS` | `250` | Floor for the window span, so a same-millisecond flush cannot divide by ~0. |
-| `REFRESH_INTERVAL_MS` | `500` | Footer refresh cadence while streaming. |
-| `MIN_ELAPSED_MS` | `400` | Below this, the rate is too noisy to show. |
+```json
+{
+  "piTokenSpeed": {
+    "windowMs": 3000,
+    "refreshIntervalMs": 500
+  }
+}
+```
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `windowMs` | `3000` | `500`–`30000` | Sliding window for the live rate. Longer = steadier, shorter = more reactive. |
+| `refreshIntervalMs` | `500` | `100`–`5000` | Footer refresh cadence while streaming. |
+
+- The config is re-read at each `session_start` and before each run, so edits apply without
+  restarting pi.
+- A missing file, missing section, or malformed JSON silently means "use the defaults".
+- A value of the wrong type falls back to the default; a number outside the range is clamped
+  to the boundary. Either way pi shows a one-time warning naming the offending key.
+- The section is called `piTokenSpeed` on purpose: the unrelated npm package
+  `pi-token-speed` uses `tokenSpeed`, so the two do not fight over one section.
+- The settings file is resolved like pi resolves its own: `PI_CODING_AGENT_DIR` if set,
+  otherwise `~/.pi/agent`.
+
+Internal thresholds (`MIN_SPAN_MS`, `MIN_ELAPSED_MS`, `COMPACT_THRESHOLD`) are intentionally
+not configurable: they only exist to keep the number honest at stream start and after a
+provider flush.
 
 ## Development
 
@@ -96,8 +119,11 @@ npm test
 ```
 
 The tests run on Node's built-in test runner with mocked timers (Node 22.18+ strips
-TypeScript types natively, so there is no build step). `TokenSpeedWindow` is exported so the
-rate math can be tested without a pi session.
+TypeScript types natively, so there is no build step). They cover the rate math, config
+resolution (defaults / fallback / clamping / wrong section name), and the extension's event
+behaviour. `TokenSpeedWindow`, `resolveConfig` and `readConfig` are exported so they can be
+tested without a pi session, and the tests point `PI_CODING_AGENT_DIR` at a temp directory so
+your real settings file is never read.
 
 ## Notes
 

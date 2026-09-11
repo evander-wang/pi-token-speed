@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -5,14 +9,31 @@ import type {
 
 const STATUS_ID = "token-speed";
 
-/** 刷新频率：流式期间每 500ms 重算一次，避免每个 delta 都重绘状态栏。 */
-const REFRESH_INTERVAL_MS = 500;
+/**
+ * settings.json 里读配置的键。
+ * 故意不叫 `tokenSpeed`：npm 上的同名包 pi-token-speed 用的是那个键，两个都装会撞车。
+ */
+const SETTINGS_KEY = "piTokenSpeed";
+
+export type TokenSpeedConfig = {
+  /** 瞬时速率的滑动窗口，毫秒。 */
+  windowMs: number;
+  /** 状态栏刷新间隔，毫秒。 */
+  refreshIntervalMs: number;
+};
+
+export const DEFAULT_CONFIG: TokenSpeedConfig = {
+  windowMs: 3000,
+  refreshIntervalMs: 500,
+};
+
+const LIMITS: Record<keyof TokenSpeedConfig, { min: number; max: number }> = {
+  windowMs: { min: 500, max: 30000 },
+  refreshIntervalMs: { min: 100, max: 5000 },
+};
 
 /** 耗时太短时速率抖动极大，先把这段时间跳过。 */
 const MIN_ELAPSED_MS = 400;
-
-/** 瞬时速率只看最近 3s：够长能扛住抖动，够短能反映「现在」的速度。 */
-const WINDOW_MS = 3000;
 
 /** 窗口跨度下限：provider 把一批 delta 压进同一毫秒时，避免除数趋近 0 刷出天价速率。 */
 const MIN_SPAN_MS = 250;
@@ -23,6 +44,83 @@ const COMPACT_THRESHOLD = 512;
 /** CJK / 假名 / 谚文按 1 字符 ≈ 1 token 估算，其余按 4 字符 ≈ 1 token。 */
 const WIDE_CHAR =
   /[\u1100-\u11ff\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uff60]/;
+
+/**
+ * 校验外部配置：缺省用默认值，类型非法回退默认值并给出提示，数值超范围钳到边界。
+ * 纯函数，不碰文件系统，方便单测。
+ */
+export function resolveConfig(raw: unknown): {
+  config: TokenSpeedConfig;
+  errors: string[];
+} {
+  const config: TokenSpeedConfig = { ...DEFAULT_CONFIG };
+  const errors: string[] = [];
+
+  if (raw === undefined || raw === null) return { config, errors };
+
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      config,
+      errors: [`settings.json 里的 "${SETTINGS_KEY}" 必须是对象，已全部使用默认值`],
+    };
+  }
+
+  for (const key of Object.keys(DEFAULT_CONFIG) as (keyof TokenSpeedConfig)[]) {
+    const value = (raw as Record<string, unknown>)[key];
+    if (value === undefined) continue;
+
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      errors.push(
+        `${SETTINGS_KEY}.${key} 必须是数字，已用默认值 ${DEFAULT_CONFIG[key]}`,
+      );
+      continue;
+    }
+
+    const { min, max } = LIMITS[key];
+    const clamped = Math.min(Math.max(value, min), max);
+    if (clamped !== value) {
+      errors.push(`${SETTINGS_KEY}.${key} 超出 ${min}–${max}，已按 ${clamped} 处理`);
+    }
+    config[key] = clamped;
+  }
+
+  return { config, errors };
+}
+
+/**
+ * 配置文件路径，规则与 pi 自己一致：PI_CODING_AGENT_DIR 优先，否则 ~/.pi/agent。
+ * 这里自己拼路径而不从 pi 导入 getAgentDir，是为了让这个文件在普通 Node 下也能跑测试。
+ */
+function settingsPath(): string {
+  const envDir = process.env.PI_CODING_AGENT_DIR;
+  if (envDir && envDir.length > 0) {
+    const dir = envDir.startsWith("~/")
+      ? join(homedir(), envDir.slice(2))
+      : envDir;
+    return join(dir, "settings.json");
+  }
+  return join(homedir(), ".pi", "agent", "settings.json");
+}
+
+/** 读取并校验配置；文件不存在或不是合法 JSON 时都静默用默认值。 */
+export function readConfig(path: string): {
+  config: TokenSpeedConfig;
+  errors: string[];
+} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return { config: { ...DEFAULT_CONFIG }, errors: [] };
+  }
+
+  const section =
+    parsed !== null && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)[SETTINGS_KEY]
+      : undefined;
+
+  return resolveConfig(section);
+}
 
 function estimateTokens(text: string): number {
   let wide = 0;
@@ -59,7 +157,7 @@ export class TokenSpeedWindow {
   private readonly windowMs: number;
 
   // 不用参数属性写法：Node 的 strip-only TS 模式不支持，测试没法直接跑这个文件。
-  constructor(windowMs: number = WINDOW_MS) {
+  constructor(windowMs: number = DEFAULT_CONFIG.windowMs) {
     this.windowMs = windowMs;
   }
 
@@ -140,7 +238,23 @@ function elapsedMs(run: Run, now: number): number {
 }
 
 export default function (pi: ExtensionAPI) {
+  let config: TokenSpeedConfig = { ...DEFAULT_CONFIG };
+  let notifiedConfigErrors = false;
   let run: Run | undefined;
+
+  /** 每次开始运行前重读一次配置，改完 settings.json 不用重启。 */
+  function loadConfig(context: ExtensionContext) {
+    const result = readConfig(settingsPath());
+    config = result.config;
+
+    if (result.errors.length > 0 && !notifiedConfigErrors) {
+      notifiedConfigErrors = true;
+      context.ui.notify(
+        `[pi-token-speed] ${result.errors.join("; ")}`,
+        "warning",
+      );
+    }
+  }
 
   function render() {
     if (run === undefined || !run.live || run.pauseStartedAt !== undefined) return;
@@ -193,9 +307,9 @@ export default function (pi: ExtensionAPI) {
       reportedOutput: 0,
       context,
       timer: undefined,
-      window: new TokenSpeedWindow(),
+      window: new TokenSpeedWindow(config.windowMs),
     };
-    run.timer = setInterval(render, REFRESH_INTERVAL_MS);
+    run.timer = setInterval(render, config.refreshIntervalMs);
   }
 
   function recordDelta(delta: string, usageOutput: number) {
@@ -215,12 +329,17 @@ export default function (pi: ExtensionAPI) {
     run.window.record(tokens, Date.now());
   }
 
+  pi.on("session_start", async (_event, ctx) => {
+    loadConfig(ctx);
+  });
+
   pi.on("message_start", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
 
     // 一次 agent 运行可能有多条 assistant 消息（中间夹着工具调用），
     // 只有没有进行中的运行时才重新开始计时。
     if (run === undefined || !run.live) {
+      loadConfig(ctx);
       startRun(ctx);
     } else {
       run.context = ctx;
