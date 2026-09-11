@@ -106,7 +106,9 @@ This package is unrelated to the npm package `pi-token-speed` by
 with a different counting model.
 
 The package follows pi's package convention with a `pi` manifest in `package.json`. The pi
-core package is declared as a peer dependency and is not bundled.
+core package is declared as an **optional** peer dependency: the extension only imports types
+from it (pi injects the runtime API object when loading the extension), so declaring it as a
+required peer would make npm pull a copy of pi core into the package directory on install.
 
 ## License
 
