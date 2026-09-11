@@ -1,0 +1,32 @@
+{
+  "name": "pi-token-speed",
+  "version": "1.0.0",
+  "description": "Show live assistant output token speed in the pi footer status bar.",
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "pi-extension",
+    "statusline",
+    "token-speed"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/evander-wang/pi-token-speed.git"
+  },
+  "bugs": {
+    "url": "https://github.com/evander-wang/pi-token-speed/issues"
+  },
+  "homepage": "https://github.com/evander-wang/pi-token-speed#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/token-speed.ts"
+    ]
+  }
+}
