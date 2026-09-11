@@ -21,6 +21,9 @@
   "engines": {
     "node": ">=18"
   },
+  "scripts": {
+    "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON \"tests/*.test.ts\""
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
